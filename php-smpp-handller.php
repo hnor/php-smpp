@@ -25,7 +25,7 @@ class handller {
 		$this->connection_type=9;
 		return $this->open($host,$port,$system_id,$password);
 	}
-	function unbind{
+	function unbind(){
 		return $this->close();
 	}
 	function open($host,$port,$system_id,$password) {
@@ -40,17 +40,16 @@ class handller {
 		$data  = sprintf("%s\0%s\0", $system_id, $password); // system_id, password 
 		$data .= sprintf("%s\0%c", "SMPP", 0x34);  // system_type, interface_version
 		$data .= sprintf("%c%c%s\0", 0, 0, ""); // addr_ton, addr_npi, address_range 
-		$s="";
-		$ret = $this->send_pdu($this->connection_type, $data,$s);
+		$this->seq+=1;
+		$ret = $this->send_pdu($this->connection_type, $data,$this->seq);
 		if($this->debug)$this->debug_str[]="Bind done!($s)" ;
-		return ($ret['status']==0);
+		return $ret;
 	}
 	function close(){
-		$s="";
-		$ret = $this->send_pdu(6, "",$s);
+		$this->seq+=1;
+		$this->send_pdu(6, "",$this->seq );
 		fclose($this->socket);
 		if($this->debug)$this->debug_str[]="Unbind done!";
-		return true;
 	}
 	//////////////////////////////////////////////////
 	function read_socket(&$res){
@@ -83,15 +82,14 @@ END;
 	}
 	//////////////////////////////////////////////////
 	function submit_enquirLink(){
-		$s="";
-		$ret = $this->send_pdu(0x15, '',$s);
-		return $ret['status'];
+		$this->seq+=1;
+		$this->send_pdu(0x15, '',$this->seq);
 	}
-	function submit_sm($source_addr,$destintation_addr,$short_message,$optional='') {
+	function submit_sm($source_addr,$destintation_addr,$short_message,$sequence,$optional='') {
 		$simulate=file_get_contents('/var/www/html/Payam/back/sim');
 		$simulate=trim(str_ireplace('\r\n','',$simulate));
 		if($simulate){
-			$w=rand(10000,300000);
+			$w=rand(10000,30000);
 			usleep($w);
 			return 'sm'.rand(111,999).$w;
 		}
@@ -100,71 +98,37 @@ END;
 		$data .= sprintf("%c%c%s\0", 1,0,$destintation_addr); // dest_addr_ton, dest_addr_npi, destintation_addr
 		$data .= sprintf("%c%c%c",$this->multipart,0,0); // esm_class, protocol_id, priority_flag
 		$data .= sprintf("%s\0%s\0", "",""); // schedule_delivery_time, validity_period
-		$data .= sprintf("%c%c", 0,0); // registered_delivery, replace_if_present_flag
+		$data .= sprintf("%c%c", 1,0); // registered_delivery, replace_if_present_flag
 		$data .= sprintf("%c%c", $this->data_coding,0); // data_coding, sm_default_msg_id
 		$data .= sprintf("%c", strlen($short_message) + $this->multipart_len );// sm_length, short_message
 		$data .= sprintf("%s", $optional.$short_message); // sm_length, short_message
-		$res='';
 		if($this->debug)$this->debug_str[]="submit_sm PDU[".$data."]";
-		$ret = $this->send_pdu(4, $data,$res);
-		if($this->debug)$this->debug_str[]="submit_sm resp[".implode('|',$ret)."] $res";
-		return ($ret['status']==0?$res:false);
+		$this->send_pdu(4, $data,$sequence);
+		if($this->debug)$this->debug_str[]="submit_sm resp[".implode('|',$ret)."]";
+		return $sequence;
 	}
-	function deliver_sm_resp() {
+	function deliver_sm_resp($pdu_seq,$MsgId) {
 		$res='';
-		if($this->debug)$this->debug_str[]="PDU[]";
-		$ret = $this->send_pdu(0x80000005, '',$res);
-		if($this->debug)$this->debug_str[]="Resp[".implode('|',$ret)."]";
-		echo "-------------------\r\n";
-		echo "in deliver_sm_resp \r\n";
-		echo " \$res val\r\n";
-		print_r($res);
-		echo "in deliver_sm_resp \r\n";
-		echo " \$ret val\r\n";
-		print_r($ret);
-		echo "-------------------\r\n";
-		return ($ret['status']==0?$res:false);
+		if($this->debug)$this->debug_str[]="send deliver_sm_resp PDU";
+		$ret = $this->send_pdu_resp(0x80000005,$pdu_seq, $MsgId,$res);
+		if($this->debug)$this->debug_str[]="deliver_sm_resp answer[".implode('|',$ret)."] ($res)";
+		return $ret;
 	}
 	//////////////////////////////////////////////////
-	function send_pdu($id,$data,&$res) {
-		$this->seq +=1;
-		$pdu = pack('NNNN', strlen($data)+16, $id, 0, $this->seq) . $data;
+	function send_pdu($id,$data,$sequence) {
+		$pdu = pack('NNNN', strlen($data)+16, $id, 0, $sequence) . $data;
 		if($this->debug)$this->debug_str[]="binery data to send [".bin2hex($pdu)."]";
 		fputs($this->socket, $pdu);
-		$data = fread($this->socket, 4);
-		if($data==false) return false;
-		$tmp = unpack('Nlength', $data);
-		$command_length = $tmp['length'];
-		if($command_length<12){
-			return;
-		}
-		$data = fread($this->socket, $command_length-4);
-		$dt=str_ireplace("\x01",'',$data);
-		$dt=str_ireplace("\x02",'',$dt);
-		$dt=str_ireplace("\x04",'',$dt);
-		$regex = <<<'END'
-		/
-		(
-			(?: [\x00-\x7F]                 # single-byte sequences   0xxxxxxx
-			|   [\xC0-\xDF][\x80-\xBF]      # double-byte sequences   110xxxxx 10xxxxxx
-			|   [\xE0-\xEF][\x80-\xBF]{2}   # triple-byte sequences   1110xxxx 10xxxxxx * 2
-			|   [\xF0-\xF7][\x80-\xBF]{3}   # quadruple-byte sequence 11110xxx 10xxxxxx * 3 
-			){1,100}                        # ...one or more times
-		)
-		| .                                 # anything else
-	/x
-END;
-		$res=preg_replace($regex, '$1', $dt);
-		$pdu = unpack('Nid/Nstatus/Nseq', $data);
-		if($this->debug){
-			$this->debug_str[]="pdu responce:";
-			foreach($pdu as $key => $val)
-				$this->debug_str[]="[$key]=>[$val]";
-		}
-		return $pdu;
 	}
-	function send_long($source_addr,$destintation_addr,$short_message,$utf=0,$flash=0) {
-		$res='0';
+	function send_pdu_resp($id,$pduseq,$data,&$res) {
+		$pdu = pack('NNNN', strlen($data)+16, $id, 0, $pduseq) . sprintf("%s",$data);
+		if($this->debug)$this->debug_str[]="binery data to send [".bin2hex($pdu)."]";
+		$p=fputs($this->socket, $pdu);
+		return $pduseq;
+	}
+	function send_long($source_addr,$destintation_addr,$short_message,$startseq,$utf=0,$flash=0) {
+		$res=array();
+		$st_seq=intval($startseq);
 		if($utf)
 			$this->data_coding=0x08;
 		if($flash)
@@ -172,10 +136,10 @@ END;
 		if($this->debug)$this->debug_str[]="send long as [$utf] [$flash]";
 		$size = strlen($short_message);
 		if($utf) $size+=20;
-		if ($size<160) { // Only one part :)
-			$res=$this->submit_sm($source_addr,$destintation_addr,$short_message);
+		if ($size<160) { //
+			$res[]=$this->submit_sm($source_addr,$destintation_addr,$short_message,++$st_seq);
 			if($this->debug)$this->debug_str[]="one part submit [$source_addr][$destintation_addr][$short_message][$res]";
-		} 
+		}
 		else { // Multipart
 			$sar_msg_ref_num =  rand(1,255);
 			$sar_total_segments = ceil(strlen($short_message)/130);
@@ -186,21 +150,14 @@ END;
 				$part = substr($short_message, 0 ,130);
 				$short_message = substr($short_message, 130);
 				$optional = pack('C*',0x05,0x00,0x03,$sar_msg_ref_num,$sar_total_segments,$sar_segment_seqnum);
-				$result=$this->submit_sm($source_addr,$destintation_addr,$part,$optional);
-				if ($result===false){
-					if($this->debug)$this->debug_str[]="multipart submit error[$sar_segment_seqnum] [$source_addr][$destintation_addr][$short_message][$res]";
-						return false;
-				}
-				else{
-					if($this->debug)$this->debug_str[]="multipart submit[$sar_segment_seqnum] [$source_addr][$destintation_addr][$short_message][$res]";
-					$res1[]=trim($result).'|';
-				}
+				$res[]=$this->submit_sm($source_addr,$destintation_addr,$part,++$st_seq,$optional);
+				if($this->debug)$this->debug_str[]="multipart submit[$sar_segment_seqnum] [$source_addr][$destintation_addr][$short_message][$res]";
 			}
-			$res=implode('|',$res1);
 		}	
 		return $res;
 	}
-
 }
+
+
 
 ?>
