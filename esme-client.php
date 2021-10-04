@@ -1,19 +1,15 @@
 <?php
 require_once(dirname(__FILE__).'/php-smpp-handller.php');
 $fn=current(explode('.',basename(__file__)));
-$OprId='100000003';
-$db=new Database();
-$opr=new Operators();
-$oprinf=$opr->GetOperatorInfo($db,$OprId);
-$oprinf=$oprinf[0];
+$smscinf=GetOperatorInfo(); //an list from smsc info
 $first=true;
 $idle_time=0;
 StartService:
 $s = new handller();
 $s->debug=false;
-$s->bind_transceiver($oprinf['ServiceIP'],$oprinf['ServicePort'],$oprinf['ServiceUname'],$oprinf['ServicePassword']);
-	StartRecive($s,$lg,$opr,$db,$OprId);
-	while($oprinf['ServiceStatus']){
+$s->bind_transceiver($smscinf['ServiceIP'],$smscinf['ServicePort'],$smscinf['ServiceUname'],$smscinf['ServicePassword']);
+	StartRecive($s,$smscinf);
+	while(true){
 		if($idle_time>=30){
 			if(!$first)$s->submit_enquirLink();
 			$idle_time=0;
@@ -36,13 +32,13 @@ $s->bind_transceiver($oprinf['ServiceIP'],$oprinf['ServicePort'],$oprinf['Servic
                                     );
 						$s->seq+=$mscnt;
 						if(count($f_arr)>20){
-							Execute($f_arr,$s,$lg,$db);
+							Execute($f_arr,$s);
 							$f_arr=array();
 							usleep(300);
 						}
 				}
 				if(count($f_arr)>0){
-					Execute($f_arr,$s,$lg,$db);
+					Execute($f_arr,$s);
 					$f_arr=array();
 				}
 				$idle_time=0;
@@ -66,7 +62,7 @@ $s->bind_transceiver($oprinf['ServiceIP'],$oprinf['ServicePort'],$oprinf['Servic
 	}
 $s->close();
 
-function Execute($TaskArray,$Sock,$Logger,$database){
+function Execute($TaskArray,$Sock){
 	global $fn;
 		$pid = pcntl_fork();
 		if ($pid == -1){
@@ -96,7 +92,7 @@ function Execute($TaskArray,$Sock,$Logger,$database){
 			exit(0);
 		}
 }
-function StartRecive($Sock,$Logger,$SmscInf,$database,$OprId){
+function StartRecive($Sock,$SmscInf){
 	global $fn;
 	$pid = pcntl_fork();
 	if ($pid == -1){
